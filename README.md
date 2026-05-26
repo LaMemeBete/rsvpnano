@@ -75,6 +75,12 @@ Supported converter inputs include:
 
 The firmware can still open `.txt` files and has an on-device EPUB fallback, but the browser converter is the best path for large books, cleaner formatting, and fewer surprises.
 
+### Languages
+
+- **Latin scripts (English, French, German, Czech, Polish, Spanish, Turkish, etc.)** are fully supported, with extended-Latin diacritics preserved by the converter.
+- **Hebrew (U+05D0–U+05EA)** is supported. Hebrew words render right-to-left with the anchor letter aligned to the same screen position as Latin. Niqqud and cantillation marks (U+0591–U+05C7) are dropped at conversion time in v1; only the 22 base letters (including the 5 final forms) are rendered. Hebrew always uses the NotoSans Serif glyphs even if Atkinson Hyperlegible or OpenDyslexic is selected for Latin text.
+- Other scripts (Arabic, Cyrillic, Greek, CJK, etc.) are not yet supported and codepoints from those ranges are dropped during conversion.
+
 ## Add Files To The Device
 
 ### Option 1: Copy To The SD Card

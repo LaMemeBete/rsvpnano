@@ -154,6 +154,13 @@ class DisplayManager {
   void drawSerifGlyphScaledPercent(int x, int y, char c, uint16_t color, uint8_t scalePercent);
   void drawSerifGlyphScaledPercent(int x, int y, char c, uint16_t color, uint8_t scalePercent,
                                    ReaderTypeface typeface);
+  void drawGlyphBitmapScaled(int x, int y, const uint8_t *bitmap, int glyphWidth, int glyphHeight,
+                             bool invert, uint16_t color, int divisor);
+  void drawGlyphBitmap70(int x, int y, const uint8_t *bitmap, int glyphWidth, int glyphHeight,
+                         bool invert, uint16_t color);
+  void drawGlyphBitmapScaledPercent(int x, int y, const uint8_t *bitmap, int glyphWidth,
+                                    int glyphHeight, bool invert, uint16_t color,
+                                    uint8_t scalePercent);
   void fillVirtualRect(int x, int y, int width, int height, uint16_t color);
   void drawSerifTextAt(const String &text, int x, int y, uint16_t color, int divisor);
   void drawSerif70TextAt(const String &text, int x, int y, uint16_t color);
@@ -179,6 +186,13 @@ class DisplayManager {
   void drawRsvpWordScaledAt(const String &word, int x, int y, int focusIndex, int divisor);
   void drawRsvpWordScaledPercentAt(const String &word, int x, int y, int focusIndex,
                                    uint8_t scalePercent);
+  // Hebrew (RTL) variants. Same screen anchor X as Latin, but the word is
+  // laid out right-to-left starting from focusCenterX, and Hebrew codepoints
+  // are looked up from the NotoSans Hebrew glyph tables.
+  void drawRsvpWordScaledRtlAt(const String &word, int x, int y, int focusByteIndex, int divisor);
+  void drawRsvp70WordRtlAt(const String &word, int x, int y, int focusByteIndex);
+  void drawRsvpWordScaledPercentRtlAt(const String &word, int x, int y, int focusByteIndex,
+                                       uint8_t scalePercent);
   void drawWordLine(const String &word, int y, uint16_t color);
   void drawMenuItem(const String &item, int y, bool selected);
   void applyBrightness();

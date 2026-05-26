@@ -14,6 +14,8 @@
 #include "display/EmbeddedOpenDyslexicFont70.h"
 #include "display/EmbeddedSerifFont.h"
 #include "display/EmbeddedSerifFont70.h"
+#include "display/EmbeddedSerifHebrew.h"
+#include "display/EmbeddedSerifHebrew70.h"
 #include "display/axs15231b.h"
 #include "text/LatinText.h"
 
@@ -229,7 +231,13 @@ DisplayManager::ReaderTypeface currentReaderTypeface() {
   return sanitizeReaderTypeface(activeTypographyConfig().typeface);
 }
 
-DisplayManager::ReaderTypeface effectiveReaderTypefaceForText(const String &) {
+DisplayManager::ReaderTypeface effectiveReaderTypefaceForText(const String &text) {
+  // Hebrew glyphs are only embedded in NotoSans Serif. Even if the user has
+  // picked Atkinson or OpenDyslexic for Latin text, render Hebrew words with
+  // the Serif typeface so they're legible instead of fallback gibberish.
+  if (LatinText::isRtlWord(text)) {
+    return DisplayManager::ReaderTypeface::Standard;
+  }
   return currentReaderTypeface();
 }
 
@@ -444,6 +452,71 @@ ReaderGlyph glyph70For(char c, DisplayManager::ReaderTypeface typeface) {
 
 ReaderGlyph glyph70For(char c) { return glyph70For(c, currentReaderTypeface()); }
 
+ReaderGlyph serifHebrewGlyphForCodepoint(uint32_t cp) {
+  if (cp < kEmbeddedSerifHebrewFirstCodepoint || cp > kEmbeddedSerifHebrewLastCodepoint) {
+    cp = kEmbeddedSerifHebrewFirstCodepoint;
+  }
+  const EmbeddedSerifHebrewGlyph &g =
+      kEmbeddedSerifHebrewGlyphs[cp - kEmbeddedSerifHebrewFirstCodepoint];
+  return {kEmbeddedSerifHebrewBitmaps + g.bitmapOffset, g.xOffset, g.width, g.xAdvance,
+          kEmbeddedSerifHebrewHeight};
+}
+
+ReaderGlyph serifHebrew70GlyphForCodepoint(uint32_t cp) {
+  if (cp < kEmbeddedSerifHebrew70FirstCodepoint || cp > kEmbeddedSerifHebrew70LastCodepoint) {
+    cp = kEmbeddedSerifHebrew70FirstCodepoint;
+  }
+  const EmbeddedSerifHebrew70Glyph &g =
+      kEmbeddedSerifHebrew70Glyphs[cp - kEmbeddedSerifHebrew70FirstCodepoint];
+  return {kEmbeddedSerifHebrew70Bitmaps + g.bitmapOffset, g.xOffset, g.width, g.xAdvance,
+          kEmbeddedSerifHebrew70Height};
+}
+
+// Look up a glyph by Unicode codepoint. Hebrew letters use the dedicated
+// NotoSans Hebrew tables regardless of the user's selected typeface; everything
+// else falls back to the byte-indexed path with the supplied typeface.
+ReaderGlyph glyphForCodepoint(uint32_t cp, DisplayManager::ReaderTypeface typeface) {
+  if (LatinText::isHebrewLetterCodepoint(cp)) {
+    return serifHebrewGlyphForCodepoint(cp);
+  }
+  return glyphFor(static_cast<char>(cp & 0xFF), typeface);
+}
+
+ReaderGlyph glyph70ForCodepoint(uint32_t cp, DisplayManager::ReaderTypeface typeface) {
+  if (LatinText::isHebrewLetterCodepoint(cp)) {
+    return serifHebrew70GlyphForCodepoint(cp);
+  }
+  return glyph70For(static_cast<char>(cp & 0xFF), typeface);
+}
+
+// Reads codepoints out of an RTL-tagged word into a fixed-size buffer. Returns
+// the number of codepoints actually written (clamped to `capacity`). Skips the
+// sentinel byte at word[0]. Malformed UTF-8 bytes are also skipped.
+struct RtlGlyphRun {
+  uint32_t codepoint;
+  uint16_t byteStart;
+};
+
+size_t collectRtlGlyphRun(const String &word, RtlGlyphRun *out, size_t capacity) {
+  if (!LatinText::isRtlWord(word) || capacity == 0) return 0;
+  size_t count = 0;
+  size_t idx = 1;
+  while (idx < word.length() && count < capacity) {
+    const size_t start = idx;
+    uint32_t cp = 0;
+    if (!LatinText::decodeNextUtf8(word, idx, cp)) {
+      ++idx;
+      continue;
+    }
+    out[count].codepoint = cp;
+    out[count].byteStart = static_cast<uint16_t>(start);
+    ++count;
+  }
+  return count;
+}
+
+constexpr size_t kMaxRtlGlyphRun = 48;
+
 const uint8_t *tinyRowsFor(char c) {
   uint8_t value = LatinText::byteValue(c);
   for (int pass = 0; pass < 2; ++pass) {
@@ -600,7 +673,100 @@ int textLayoutWidth(const TextLayoutMetrics &layout) {
   return std::max(0, layout.maxX - layout.minX);
 }
 
+// Right-to-left layout: visual order is the reverse of reading order, so the
+// last codepoint in the UTF-8 stream is drawn at the leftmost cursor position.
+// focusByteIndex is the byte offset of the focus codepoint inside `word`.
+TextLayoutMetrics serifWordLayoutRtl(const String &word, int focusByteIndex, int divisor) {
+  TextLayoutMetrics layout;
+  divisor = std::max(1, divisor);
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) return layout;
+
+  const bool trackFocus = focusByteIndex >= 0;
+  int cursorX = 0;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];  // visual order
+    const ReaderGlyph glyph =
+        glyphForCodepoint(r.codepoint, DisplayManager::ReaderTypeface::Standard);
+    const int xOffset = scaledSignedAdvance(glyph.xOffset, divisor);
+    const int width = glyph.width == 0 ? 0 : scaledAdvance(glyph.width, divisor);
+    const int advance = scaledAdvance(glyph.xAdvance, divisor);
+    const int left = cursorX + xOffset;
+    updateTextLayoutBounds(layout, left, width);
+
+    if (trackFocus && static_cast<int>(r.byteStart) == focusByteIndex) {
+      layout.focusCenterX = width > 0 ? left + (width / 2) : cursorX + (advance / 2);
+    }
+    cursorX += std::max(1, trackedAdvanceScaled(glyph.xAdvance, divisor, v, count));
+  }
+
+  if (!trackFocus && layout.hasPixels) {
+    layout.focusCenterX = layout.minX + (textLayoutWidth(layout) / 2);
+  }
+  return layout;
+}
+
+TextLayoutMetrics serifWordLayoutScaledPercentRtl(const String &word, int focusByteIndex,
+                                                   uint8_t scalePercent) {
+  TextLayoutMetrics layout;
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) return layout;
+
+  const bool trackFocus = focusByteIndex >= 0;
+  int cursorX = 0;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph =
+        glyphForCodepoint(r.codepoint, DisplayManager::ReaderTypeface::Standard);
+    const int xOffset = scaledSignedPercent(glyph.xOffset, scalePercent);
+    const int width = glyph.width == 0 ? 0 : scaledPercentDimension(glyph.width, scalePercent);
+    const int advance = scaledPercentDimension(glyph.xAdvance, scalePercent);
+    const int left = cursorX + xOffset;
+    updateTextLayoutBounds(layout, left, width);
+    if (trackFocus && static_cast<int>(r.byteStart) == focusByteIndex) {
+      layout.focusCenterX = width > 0 ? left + (width / 2) : cursorX + (advance / 2);
+    }
+    cursorX += std::max(1, trackedAdvanceScaledPercent(glyph.xAdvance, scalePercent, v, count));
+  }
+  if (!trackFocus && layout.hasPixels) {
+    layout.focusCenterX = layout.minX + (textLayoutWidth(layout) / 2);
+  }
+  return layout;
+}
+
+TextLayoutMetrics serif70WordLayoutRtl(const String &word, int focusByteIndex) {
+  TextLayoutMetrics layout;
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) return layout;
+
+  const bool trackFocus = focusByteIndex >= 0;
+  int cursorX = 0;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph =
+        glyph70ForCodepoint(r.codepoint, DisplayManager::ReaderTypeface::Standard);
+    const int left = cursorX + glyph.xOffset;
+    const int width = glyph.width;
+    const int advance = glyph.xAdvance;
+    updateTextLayoutBounds(layout, left, width);
+    if (trackFocus && static_cast<int>(r.byteStart) == focusByteIndex) {
+      layout.focusCenterX = width > 0 ? left + (width / 2) : cursorX + (advance / 2);
+    }
+    cursorX += std::max(1, trackedAdvance(glyph.xAdvance, v, count));
+  }
+  if (!trackFocus && layout.hasPixels) {
+    layout.focusCenterX = layout.minX + (textLayoutWidth(layout) / 2);
+  }
+  return layout;
+}
+
 TextLayoutMetrics serifWordLayout(const String &word, int focusIndex, int divisor = 1) {
+  if (LatinText::isRtlWord(word)) {
+    return serifWordLayoutRtl(word, focusIndex, divisor);
+  }
   TextLayoutMetrics layout;
   int cursorX = 0;
   const bool trackFocus = focusIndex >= 0;
@@ -637,6 +803,9 @@ TextLayoutMetrics serifWordLayout(const String &word, int focusIndex, int diviso
 
 TextLayoutMetrics serifWordLayoutScaledPercent(const String &word, int focusIndex,
                                                uint8_t scalePercent) {
+  if (LatinText::isRtlWord(word)) {
+    return serifWordLayoutScaledPercentRtl(word, focusIndex, scalePercent);
+  }
   TextLayoutMetrics layout;
   int cursorX = 0;
   const bool trackFocus = focusIndex >= 0;
@@ -673,6 +842,9 @@ TextLayoutMetrics serifWordLayoutScaledPercent(const String &word, int focusInde
 }
 
 TextLayoutMetrics serif70WordLayout(const String &word, int focusIndex) {
+  if (LatinText::isRtlWord(word)) {
+    return serif70WordLayoutRtl(word, focusIndex);
+  }
   TextLayoutMetrics layout;
   int cursorX = 0;
   const bool trackFocus = focusIndex >= 0;
@@ -746,7 +918,32 @@ int orpOrdinalForLength(int length) {
   return 4;
 }
 
+int findFocusLetterIndexRtl(const String &word) {
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) return word.length() > 1 ? 1 : -1;
+
+  int letterCount = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (LatinText::isHebrewLetterCodepoint(run[i].codepoint)) ++letterCount;
+  }
+  if (letterCount == 0) return static_cast<int>(run[0].byteStart);
+
+  const int target = std::min(orpOrdinalForLength(letterCount), letterCount - 1);
+  int ordinal = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (!LatinText::isHebrewLetterCodepoint(run[i].codepoint)) continue;
+    if (ordinal == target) return static_cast<int>(run[i].byteStart);
+    ++ordinal;
+  }
+  return static_cast<int>(run[0].byteStart);
+}
+
 int findFocusLetterIndex(const String &word) {
+  if (LatinText::isRtlWord(word)) {
+    return findFocusLetterIndexRtl(word);
+  }
+
   int wordCharacterCount = 0;
   for (size_t i = 0; i < word.length(); ++i) {
     if (isWordCharacter(word[i])) {
@@ -1286,10 +1483,19 @@ void DisplayManager::drawSerifGlyphScaled(int x, int y, char c, uint16_t color, 
   if (glyph.width == 0) {
     return;
   }
-  const bool invert = shouldDrawInvertedGlyph(c);
+  drawGlyphBitmapScaled(x, y, glyph.bitmap, glyph.width, glyph.height, shouldDrawInvertedGlyph(c),
+                        color, divisor);
+}
 
-  const int glyphHeight = glyph.height;
-  const int scaledWidth = std::max(1, (glyph.width + divisor - 1) / divisor);
+void DisplayManager::drawGlyphBitmapScaled(int x, int y, const uint8_t *bitmap, int glyphWidth,
+                                           int glyphHeight, bool invert, uint16_t color,
+                                           int divisor) {
+  divisor = std::max(1, divisor);
+  if (glyphWidth <= 0 || glyphHeight <= 0 || bitmap == nullptr) {
+    return;
+  }
+
+  const int scaledWidth = std::max(1, (glyphWidth + divisor - 1) / divisor);
   const int scaledHeight = std::max(1, (glyphHeight + divisor - 1) / divisor);
 
   for (int dstRow = 0; dstRow < scaledHeight; ++dstRow) {
@@ -1307,14 +1513,14 @@ void DisplayManager::drawSerifGlyphScaled(int x, int y, char c, uint16_t color, 
       }
 
       const int sourceXStart = dstCol * divisor;
-      const int sourceXEnd = std::min(static_cast<int>(glyph.width), sourceXStart + divisor);
+      const int sourceXEnd = std::min(glyphWidth, sourceXStart + divisor);
       uint32_t alphaSum = 0;
       uint32_t sampleCount = 0;
       for (int sourceY = sourceYStart; sourceY < sourceYEnd; ++sourceY) {
         for (int sourceX = sourceXStart; sourceX < sourceXEnd; ++sourceX) {
           const int lookupY = invert ? glyphHeight - 1 - sourceY : sourceY;
-          const int lookupX = invert ? glyph.width - 1 - sourceX : sourceX;
-          alphaSum += glyph.bitmap[lookupY * glyph.width + lookupX];
+          const int lookupX = invert ? glyphWidth - 1 - sourceX : sourceX;
+          alphaSum += bitmap[lookupY * glyphWidth + lookupX];
           ++sampleCount;
         }
       }
@@ -1340,23 +1546,30 @@ void DisplayManager::drawSerif70Glyph(int x, int y, char c, uint16_t color, Read
   if (glyph.width == 0) {
     return;
   }
-  const bool invert = shouldDrawInvertedGlyph(c);
+  drawGlyphBitmap70(x, y, glyph.bitmap, glyph.width, glyph.height, shouldDrawInvertedGlyph(c),
+                    color);
+}
 
-  for (int row = 0; row < glyph.height; ++row) {
+void DisplayManager::drawGlyphBitmap70(int x, int y, const uint8_t *bitmap, int glyphWidth,
+                                       int glyphHeight, bool invert, uint16_t color) {
+  if (glyphWidth <= 0 || glyphHeight <= 0 || bitmap == nullptr) {
+    return;
+  }
+  for (int row = 0; row < glyphHeight; ++row) {
     const int dstY = y + row;
     if (dstY < 0 || dstY >= kVirtualBufferHeight) {
       continue;
     }
 
-    for (int col = 0; col < glyph.width; ++col) {
+    for (int col = 0; col < glyphWidth; ++col) {
       const int dstX = x + col;
       if (dstX < 0 || dstX >= kVirtualBufferWidth) {
         continue;
       }
 
-      const int sourceRow = invert ? glyph.height - 1 - row : row;
-      const int sourceCol = invert ? glyph.width - 1 - col : col;
-      const uint8_t alpha = glyph.bitmap[sourceRow * glyph.width + sourceCol];
+      const int sourceRow = invert ? glyphHeight - 1 - row : row;
+      const int sourceCol = invert ? glyphWidth - 1 - col : col;
+      const uint8_t alpha = bitmap[sourceRow * glyphWidth + sourceCol];
       if (alpha < kGlyphAlphaThreshold) {
         continue;
       }
@@ -1379,16 +1592,25 @@ void DisplayManager::drawSerifGlyphScaledPercent(int x, int y, char c, uint16_t 
     drawGlyph(x, y, c, color, typeface);
     return;
   }
-
   const ReaderGlyph glyph = glyphFor(c, typeface);
   if (glyph.width == 0) {
     return;
   }
-  const bool invert = shouldDrawInvertedGlyph(c);
+  drawGlyphBitmapScaledPercent(x, y, glyph.bitmap, glyph.width, glyph.height,
+                               shouldDrawInvertedGlyph(c), color, scalePercent);
+}
 
-  const int glyphHeight = glyph.height;
-  const int scaledWidth = scaledPercentDimension(glyph.width, scalePercent);
+void DisplayManager::drawGlyphBitmapScaledPercent(int x, int y, const uint8_t *bitmap,
+                                                  int glyphWidth, int glyphHeight, bool invert,
+                                                  uint16_t color, uint8_t scalePercent) {
+  if (glyphWidth <= 0 || glyphHeight <= 0 || bitmap == nullptr) {
+    return;
+  }
+  const int scaledWidth = scaledPercentDimension(glyphWidth, scalePercent);
   const int scaledHeight = scaledPercentDimension(glyphHeight, scalePercent);
+  if (scaledWidth <= 0 || scaledHeight <= 0) {
+    return;
+  }
 
   for (int dstRow = 0; dstRow < scaledHeight; ++dstRow) {
     const int dstY = y + dstRow;
@@ -1405,17 +1627,17 @@ void DisplayManager::drawSerifGlyphScaledPercent(int x, int y, char c, uint16_t 
         continue;
       }
 
-      const int sourceXStart = (dstCol * glyph.width) / scaledWidth;
+      const int sourceXStart = (dstCol * glyphWidth) / scaledWidth;
       const int sourceXEnd =
-          std::min(static_cast<int>(glyph.width),
-                   ((dstCol + 1) * glyph.width + scaledWidth - 1) / scaledWidth);
+          std::min(glyphWidth,
+                   ((dstCol + 1) * glyphWidth + scaledWidth - 1) / scaledWidth);
       uint32_t alphaSum = 0;
       uint32_t sampleCount = 0;
       for (int sourceY = sourceYStart; sourceY < sourceYEnd; ++sourceY) {
         for (int sourceX = sourceXStart; sourceX < sourceXEnd; ++sourceX) {
           const int lookupY = invert ? glyphHeight - 1 - sourceY : sourceY;
-          const int lookupX = invert ? glyph.width - 1 - sourceX : sourceX;
-          alphaSum += glyph.bitmap[lookupY * glyph.width + lookupX];
+          const int lookupX = invert ? glyphWidth - 1 - sourceX : sourceX;
+          alphaSum += bitmap[lookupY * glyphWidth + lookupX];
           ++sampleCount;
         }
       }
@@ -1647,6 +1869,10 @@ void DisplayManager::drawWordAt(const String &word, int x, int y, uint16_t color
 
 void DisplayManager::drawRsvpWordScaledAt(const String &word, int x, int y, int focusIndex,
                                           int divisor) {
+  if (LatinText::isRtlWord(word)) {
+    drawRsvpWordScaledRtlAt(word, x, y, focusIndex, divisor);
+    return;
+  }
   divisor = std::max(1, divisor);
   const bool highlightFocus = currentFocusHighlightEnabled();
   int cursorX = x;
@@ -1670,6 +1896,10 @@ void DisplayManager::drawRsvpWordScaledAt(const String &word, int x, int y, int 
 }
 
 void DisplayManager::drawRsvp70WordAt(const String &word, int x, int y, int focusIndex) {
+  if (LatinText::isRtlWord(word)) {
+    drawRsvp70WordRtlAt(word, x, y, focusIndex);
+    return;
+  }
   const bool highlightFocus = currentFocusHighlightEnabled();
   int cursorX = x;
   const ReaderTypeface typeface = effectiveReaderTypefaceForText(word);
@@ -1690,6 +1920,10 @@ void DisplayManager::drawRsvp70WordAt(const String &word, int x, int y, int focu
 
 void DisplayManager::drawRsvpWordScaledPercentAt(const String &word, int x, int y, int focusIndex,
                                                  uint8_t scalePercent) {
+  if (LatinText::isRtlWord(word)) {
+    drawRsvpWordScaledPercentRtlAt(word, x, y, focusIndex, scalePercent);
+    return;
+  }
   const bool highlightFocus = currentFocusHighlightEnabled();
   int cursorX = x;
   const ReaderTypeface typeface = effectiveReaderTypefaceForText(word);
@@ -1715,6 +1949,71 @@ void DisplayManager::drawRsvpWordScaledPercentAt(const String &word, int x, int 
 
 void DisplayManager::drawRsvpWordAt(const String &word, int x, int y, int focusIndex) {
   drawRsvpWordScaledAt(word, x, y, focusIndex, 1);
+}
+
+void DisplayManager::drawRsvpWordScaledRtlAt(const String &word, int x, int y, int focusByteIndex,
+                                             int divisor) {
+  divisor = std::max(1, divisor);
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) {
+    return;
+  }
+  const bool highlightFocus = currentFocusHighlightEnabled();
+  int cursorX = x;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph = glyphForCodepoint(r.codepoint, ReaderTypeface::Standard);
+    const uint16_t color =
+        (highlightFocus && static_cast<int>(r.byteStart) == focusByteIndex) ? focusColor()
+                                                                            : wordColor();
+    const int xOffset = scaledSignedAdvance(glyph.xOffset, divisor);
+    drawGlyphBitmapScaled(cursorX + xOffset, y, glyph.bitmap, glyph.width, glyph.height, false,
+                          color, divisor);
+    cursorX += std::max(1, trackedAdvanceScaled(glyph.xAdvance, divisor, v, count));
+  }
+}
+
+void DisplayManager::drawRsvp70WordRtlAt(const String &word, int x, int y, int focusByteIndex) {
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) {
+    return;
+  }
+  const bool highlightFocus = currentFocusHighlightEnabled();
+  int cursorX = x;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph = glyph70ForCodepoint(r.codepoint, ReaderTypeface::Standard);
+    const uint16_t color =
+        (highlightFocus && static_cast<int>(r.byteStart) == focusByteIndex) ? focusColor()
+                                                                            : wordColor();
+    drawGlyphBitmap70(cursorX + glyph.xOffset, y, glyph.bitmap, glyph.width, glyph.height, false,
+                      color);
+    cursorX += std::max(1, trackedAdvance(glyph.xAdvance, v, count));
+  }
+}
+
+void DisplayManager::drawRsvpWordScaledPercentRtlAt(const String &word, int x, int y,
+                                                     int focusByteIndex, uint8_t scalePercent) {
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) {
+    return;
+  }
+  const bool highlightFocus = currentFocusHighlightEnabled();
+  int cursorX = x;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph = glyphForCodepoint(r.codepoint, ReaderTypeface::Standard);
+    const uint16_t color =
+        (highlightFocus && static_cast<int>(r.byteStart) == focusByteIndex) ? focusColor()
+                                                                            : wordColor();
+    const int xOffset = scaledSignedPercent(glyph.xOffset, scalePercent);
+    drawGlyphBitmapScaledPercent(cursorX + xOffset, y, glyph.bitmap, glyph.width, glyph.height,
+                                 false, color, scalePercent);
+    cursorX += std::max(1, trackedAdvanceScaledPercent(glyph.xAdvance, scalePercent, v, count));
+  }
 }
 
 void DisplayManager::drawWordLine(const String &word, int y, uint16_t color) {
