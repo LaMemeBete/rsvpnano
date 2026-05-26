@@ -193,6 +193,11 @@ class DisplayManager {
   void drawRsvp70WordRtlAt(const String &word, int x, int y, int focusByteIndex);
   void drawRsvpWordScaledPercentRtlAt(const String &word, int x, int y, int focusByteIndex,
                                        uint8_t scalePercent);
+  // Phantom (before/after) RTL helpers — single colour, no focus highlight.
+  void drawHebrewWordScaledAt(const String &word, int x, int y, uint16_t color, int divisor);
+  void drawHebrewWord70At(const String &word, int x, int y, uint16_t color);
+  void drawHebrewWordScaledPercentAt(const String &word, int x, int y, uint16_t color,
+                                      uint8_t scalePercent);
   void drawWordLine(const String &word, int y, uint16_t color);
   void drawMenuItem(const String &item, int y, bool selected);
   void applyBrightness();

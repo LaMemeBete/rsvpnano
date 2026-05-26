@@ -1332,16 +1332,83 @@ int DisplayManager::measureTextWidth(const String &word) const {
   return textLayoutWidth(serifWordLayout(word, -1));
 }
 
+namespace {
+
+bool textContainsRtlRun(const String &text) {
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (LatinText::isRtlSentinel(LatinText::byteValue(text[i]))) return true;
+  }
+  return false;
+}
+
+template <typename Callback>
+void forEachTextWord(const String &text, Callback cb) {
+  size_t i = 0;
+  bool emittedAny = false;
+  while (i < text.length()) {
+    while (i < text.length() && text[i] == ' ') ++i;
+    if (i >= text.length()) break;
+    const size_t start = i;
+    while (i < text.length() && text[i] != ' ') ++i;
+    if (emittedAny) cb(String());  // inter-word space
+    cb(text.substring(start, i));
+    emittedAny = true;
+  }
+}
+
+}  // namespace
+
 int DisplayManager::measureSerifTextWidth(const String &text, int divisor) const {
-  return textLayoutWidth(serifWordLayout(text, -1, divisor));
+  if (!textContainsRtlRun(text)) {
+    return textLayoutWidth(serifWordLayout(text, -1, divisor));
+  }
+  divisor = std::max(1, divisor);
+  const ReaderGlyph spaceGlyph = glyphFor(' ', currentReaderTypeface());
+  const int spaceAdvance = std::max(1, scaledAdvance(spaceGlyph.xAdvance, divisor));
+  int total = 0;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      total += spaceAdvance;
+      return;
+    }
+    total += textLayoutWidth(serifWordLayout(word, -1, divisor));
+  });
+  return total;
 }
 
 int DisplayManager::measureSerif70TextWidth(const String &text) const {
-  return textLayoutWidth(serif70WordLayout(text, -1));
+  if (!textContainsRtlRun(text)) {
+    return textLayoutWidth(serif70WordLayout(text, -1));
+  }
+  const ReaderGlyph spaceGlyph = glyph70For(' ', currentReaderTypeface());
+  const int spaceAdvance = std::max(1, static_cast<int>(spaceGlyph.xAdvance));
+  int total = 0;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      total += spaceAdvance;
+      return;
+    }
+    total += textLayoutWidth(serif70WordLayout(word, -1));
+  });
+  return total;
 }
 
 int DisplayManager::measureSerifTextWidthScaled(const String &text, uint8_t scalePercent) const {
-  return textLayoutWidth(serifWordLayoutScaledPercent(text, -1, scalePercent));
+  if (!textContainsRtlRun(text)) {
+    return textLayoutWidth(serifWordLayoutScaledPercent(text, -1, scalePercent));
+  }
+  const ReaderGlyph spaceGlyph = glyphFor(' ', currentReaderTypeface());
+  const int spaceAdvance =
+      std::max(1, scaledPercentDimension(spaceGlyph.xAdvance, scalePercent));
+  int total = 0;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      total += spaceAdvance;
+      return;
+    }
+    total += textLayoutWidth(serifWordLayoutScaledPercent(word, -1, scalePercent));
+  });
+  return total;
 }
 
 int DisplayManager::measureTinyTextWidth(const String &text, int scale) const {
@@ -1671,60 +1738,156 @@ void DisplayManager::fillVirtualRect(int x, int y, int width, int height, uint16
 void DisplayManager::drawSerifTextAt(const String &text, int x, int y, uint16_t color,
                                      int divisor) {
   divisor = std::max(1, divisor);
-  int cursorX = x;
-  const ReaderTypeface typeface = effectiveReaderTypefaceForText(text);
-  for (size_t i = 0; i < text.length(); ++i) {
-    const ReaderGlyph glyph = glyphFor(text[i], typeface);
-    const int xOffset = scaledSignedAdvance(glyph.xOffset, divisor);
-    const int width = glyph.width == 0 ? 0 : scaledAdvance(glyph.width, divisor);
-    drawSerifGlyphScaled(cursorX + xOffset, y, text[i], color, divisor, typeface);
-    int tracked = trackedAdvanceScaled(glyph.xAdvance, divisor, i, text.length());
-    if (i + 1 < text.length()) {
-      const ReaderGlyph nextGlyph = glyphFor(text[i + 1], typeface);
-      tracked -= opticalKerningAdjustment(
-          text[i], text[i + 1], xOffset, width, tracked,
-          scaledSignedAdvance(nextGlyph.xOffset, divisor), scaledDesiredGap(divisor));
+  if (!textContainsRtlRun(text)) {
+    int cursorX = x;
+    const ReaderTypeface typeface = effectiveReaderTypefaceForText(text);
+    for (size_t i = 0; i < text.length(); ++i) {
+      const ReaderGlyph glyph = glyphFor(text[i], typeface);
+      const int xOffset = scaledSignedAdvance(glyph.xOffset, divisor);
+      const int width = glyph.width == 0 ? 0 : scaledAdvance(glyph.width, divisor);
+      drawSerifGlyphScaled(cursorX + xOffset, y, text[i], color, divisor, typeface);
+      int tracked = trackedAdvanceScaled(glyph.xAdvance, divisor, i, text.length());
+      if (i + 1 < text.length()) {
+        const ReaderGlyph nextGlyph = glyphFor(text[i + 1], typeface);
+        tracked -= opticalKerningAdjustment(
+            text[i], text[i + 1], xOffset, width, tracked,
+            scaledSignedAdvance(nextGlyph.xOffset, divisor), scaledDesiredGap(divisor));
+      }
+      cursorX += std::max(1, tracked);
     }
-    cursorX += std::max(1, tracked);
+    return;
   }
+  const ReaderTypeface latinTypeface = currentReaderTypeface();
+  int cursorX = x;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      const ReaderGlyph spaceGlyph = glyphFor(' ', latinTypeface);
+      cursorX += std::max(1, scaledAdvance(spaceGlyph.xAdvance, divisor));
+      return;
+    }
+    if (LatinText::isRtlWord(word)) {
+      const TextLayoutMetrics layout = serifWordLayout(word, -1, divisor);
+      drawHebrewWordScaledAt(word, cursorX - layout.minX, y, color, divisor);
+      cursorX += textLayoutWidth(layout);
+      return;
+    }
+    for (size_t j = 0; j < word.length(); ++j) {
+      const ReaderGlyph glyph = glyphFor(word[j], latinTypeface);
+      const int xOffset = scaledSignedAdvance(glyph.xOffset, divisor);
+      const int width = glyph.width == 0 ? 0 : scaledAdvance(glyph.width, divisor);
+      drawSerifGlyphScaled(cursorX + xOffset, y, word[j], color, divisor, latinTypeface);
+      int tracked = trackedAdvanceScaled(glyph.xAdvance, divisor, j, word.length());
+      if (j + 1 < word.length()) {
+        const ReaderGlyph nextGlyph = glyphFor(word[j + 1], latinTypeface);
+        tracked -= opticalKerningAdjustment(
+            word[j], word[j + 1], xOffset, width, tracked,
+            scaledSignedAdvance(nextGlyph.xOffset, divisor), scaledDesiredGap(divisor));
+      }
+      cursorX += std::max(1, tracked);
+    }
+  });
 }
 
 void DisplayManager::drawSerif70TextAt(const String &text, int x, int y, uint16_t color) {
-  int cursorX = x;
-  const ReaderTypeface typeface = effectiveReaderTypefaceForText(text);
-  for (size_t i = 0; i < text.length(); ++i) {
-    const ReaderGlyph glyph = glyph70For(text[i], typeface);
-    drawSerif70Glyph(cursorX + glyph.xOffset, y, text[i], color, typeface);
-    int tracked = trackedAdvance(glyph.xAdvance, i, text.length());
-    if (i + 1 < text.length()) {
-      const ReaderGlyph nextGlyph = glyph70For(text[i + 1], typeface);
-      tracked -= opticalKerningAdjustment(text[i], text[i + 1], glyph.xOffset, glyph.width, tracked,
-                                          nextGlyph.xOffset, regularDesiredGap());
+  if (!textContainsRtlRun(text)) {
+    int cursorX = x;
+    const ReaderTypeface typeface = effectiveReaderTypefaceForText(text);
+    for (size_t i = 0; i < text.length(); ++i) {
+      const ReaderGlyph glyph = glyph70For(text[i], typeface);
+      drawSerif70Glyph(cursorX + glyph.xOffset, y, text[i], color, typeface);
+      int tracked = trackedAdvance(glyph.xAdvance, i, text.length());
+      if (i + 1 < text.length()) {
+        const ReaderGlyph nextGlyph = glyph70For(text[i + 1], typeface);
+        tracked -= opticalKerningAdjustment(text[i], text[i + 1], glyph.xOffset, glyph.width,
+                                            tracked, nextGlyph.xOffset, regularDesiredGap());
+      }
+      cursorX += std::max(1, tracked);
     }
-    cursorX += std::max(1, tracked);
+    return;
   }
+  const ReaderTypeface latinTypeface = currentReaderTypeface();
+  int cursorX = x;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      const ReaderGlyph spaceGlyph = glyph70For(' ', latinTypeface);
+      cursorX += std::max(1, spaceGlyph.xAdvance);
+      return;
+    }
+    if (LatinText::isRtlWord(word)) {
+      const TextLayoutMetrics layout = serif70WordLayout(word, -1);
+      drawHebrewWord70At(word, cursorX - layout.minX, y, color);
+      cursorX += textLayoutWidth(layout);
+      return;
+    }
+    for (size_t j = 0; j < word.length(); ++j) {
+      const ReaderGlyph glyph = glyph70For(word[j], latinTypeface);
+      drawSerif70Glyph(cursorX + glyph.xOffset, y, word[j], color, latinTypeface);
+      int tracked = trackedAdvance(glyph.xAdvance, j, word.length());
+      if (j + 1 < word.length()) {
+        const ReaderGlyph nextGlyph = glyph70For(word[j + 1], latinTypeface);
+        tracked -= opticalKerningAdjustment(word[j], word[j + 1], glyph.xOffset, glyph.width,
+                                            tracked, nextGlyph.xOffset, regularDesiredGap());
+      }
+      cursorX += std::max(1, tracked);
+    }
+  });
 }
 
 void DisplayManager::drawSerifTextScaledAt(const String &text, int x, int y, uint16_t color,
                                            uint8_t scalePercent) {
-  int cursorX = x;
-  const ReaderTypeface typeface = effectiveReaderTypefaceForText(text);
-  for (size_t i = 0; i < text.length(); ++i) {
-    const ReaderGlyph glyph = glyphFor(text[i], typeface);
-    const int xOffset = scaledSignedPercent(glyph.xOffset, scalePercent);
-    const int width =
-        glyph.width == 0 ? 0 : scaledPercentDimension(glyph.width, scalePercent);
-    drawSerifGlyphScaledPercent(cursorX + xOffset, y, text[i], color, scalePercent, typeface);
-    int tracked = trackedAdvanceScaledPercent(glyph.xAdvance, scalePercent, i, text.length());
-    if (i + 1 < text.length()) {
-      const ReaderGlyph nextGlyph = glyphFor(text[i + 1], typeface);
-      tracked -= opticalKerningAdjustment(
-          text[i], text[i + 1], xOffset, width, tracked,
-          scaledSignedPercent(nextGlyph.xOffset, scalePercent),
-          scaledPercentDesiredGap(scalePercent));
+  if (!textContainsRtlRun(text)) {
+    int cursorX = x;
+    const ReaderTypeface typeface = effectiveReaderTypefaceForText(text);
+    for (size_t i = 0; i < text.length(); ++i) {
+      const ReaderGlyph glyph = glyphFor(text[i], typeface);
+      const int xOffset = scaledSignedPercent(glyph.xOffset, scalePercent);
+      const int width =
+          glyph.width == 0 ? 0 : scaledPercentDimension(glyph.width, scalePercent);
+      drawSerifGlyphScaledPercent(cursorX + xOffset, y, text[i], color, scalePercent, typeface);
+      int tracked = trackedAdvanceScaledPercent(glyph.xAdvance, scalePercent, i, text.length());
+      if (i + 1 < text.length()) {
+        const ReaderGlyph nextGlyph = glyphFor(text[i + 1], typeface);
+        tracked -= opticalKerningAdjustment(
+            text[i], text[i + 1], xOffset, width, tracked,
+            scaledSignedPercent(nextGlyph.xOffset, scalePercent),
+            scaledPercentDesiredGap(scalePercent));
+      }
+      cursorX += std::max(1, tracked);
     }
-    cursorX += std::max(1, tracked);
+    return;
   }
+  const ReaderTypeface latinTypeface = currentReaderTypeface();
+  int cursorX = x;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      const ReaderGlyph spaceGlyph = glyphFor(' ', latinTypeface);
+      cursorX += std::max(1, scaledPercentDimension(spaceGlyph.xAdvance, scalePercent));
+      return;
+    }
+    if (LatinText::isRtlWord(word)) {
+      const TextLayoutMetrics layout = serifWordLayoutScaledPercent(word, -1, scalePercent);
+      drawHebrewWordScaledPercentAt(word, cursorX - layout.minX, y, color, scalePercent);
+      cursorX += textLayoutWidth(layout);
+      return;
+    }
+    for (size_t j = 0; j < word.length(); ++j) {
+      const ReaderGlyph glyph = glyphFor(word[j], latinTypeface);
+      const int xOffset = scaledSignedPercent(glyph.xOffset, scalePercent);
+      const int width =
+          glyph.width == 0 ? 0 : scaledPercentDimension(glyph.width, scalePercent);
+      drawSerifGlyphScaledPercent(cursorX + xOffset, y, word[j], color, scalePercent,
+                                  latinTypeface);
+      int tracked = trackedAdvanceScaledPercent(glyph.xAdvance, scalePercent, j, word.length());
+      if (j + 1 < word.length()) {
+        const ReaderGlyph nextGlyph = glyphFor(word[j + 1], latinTypeface);
+        tracked -= opticalKerningAdjustment(
+            word[j], word[j + 1], xOffset, width, tracked,
+            scaledSignedPercent(nextGlyph.xOffset, scalePercent),
+            scaledPercentDesiredGap(scalePercent));
+      }
+      cursorX += std::max(1, tracked);
+    }
+  });
 }
 
 void DisplayManager::drawTinyGlyph(int x, int y, char c, uint16_t color, int scale) {
@@ -2009,6 +2172,53 @@ void DisplayManager::drawRsvpWordScaledPercentRtlAt(const String &word, int x, i
     const uint16_t color =
         (highlightFocus && static_cast<int>(r.byteStart) == focusByteIndex) ? focusColor()
                                                                             : wordColor();
+    const int xOffset = scaledSignedPercent(glyph.xOffset, scalePercent);
+    drawGlyphBitmapScaledPercent(cursorX + xOffset, y, glyph.bitmap, glyph.width, glyph.height,
+                                 false, color, scalePercent);
+    cursorX += std::max(1, trackedAdvanceScaledPercent(glyph.xAdvance, scalePercent, v, count));
+  }
+}
+
+void DisplayManager::drawHebrewWordScaledAt(const String &word, int x, int y, uint16_t color,
+                                            int divisor) {
+  divisor = std::max(1, divisor);
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) return;
+  int cursorX = x;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph = glyphForCodepoint(r.codepoint, ReaderTypeface::Standard);
+    const int xOffset = scaledSignedAdvance(glyph.xOffset, divisor);
+    drawGlyphBitmapScaled(cursorX + xOffset, y, glyph.bitmap, glyph.width, glyph.height, false,
+                          color, divisor);
+    cursorX += std::max(1, trackedAdvanceScaled(glyph.xAdvance, divisor, v, count));
+  }
+}
+
+void DisplayManager::drawHebrewWord70At(const String &word, int x, int y, uint16_t color) {
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) return;
+  int cursorX = x;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph = glyph70ForCodepoint(r.codepoint, ReaderTypeface::Standard);
+    drawGlyphBitmap70(cursorX + glyph.xOffset, y, glyph.bitmap, glyph.width, glyph.height, false,
+                      color);
+    cursorX += std::max(1, trackedAdvance(glyph.xAdvance, v, count));
+  }
+}
+
+void DisplayManager::drawHebrewWordScaledPercentAt(const String &word, int x, int y,
+                                                   uint16_t color, uint8_t scalePercent) {
+  RtlGlyphRun run[kMaxRtlGlyphRun];
+  const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
+  if (count == 0) return;
+  int cursorX = x;
+  for (size_t v = 0; v < count; ++v) {
+    const RtlGlyphRun &r = run[count - 1 - v];
+    const ReaderGlyph glyph = glyphForCodepoint(r.codepoint, ReaderTypeface::Standard);
     const int xOffset = scaledSignedPercent(glyph.xOffset, scalePercent);
     drawGlyphBitmapScaledPercent(cursorX + xOffset, y, glyph.bitmap, glyph.width, glyph.height,
                                  false, color, scalePercent);
