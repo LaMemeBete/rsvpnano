@@ -666,6 +666,66 @@ void updateTextLayoutBounds(TextLayoutMetrics &layout, int left, int width) {
   layout.maxX = std::max(layout.maxX, right);
 }
 
+bool textContainsRtlRun(const String &text) {
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (LatinText::isRtlSentinel(LatinText::byteValue(text[i]))) return true;
+  }
+  return false;
+}
+
+bool textContainsSpace(const String &text) {
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (text[i] == ' ') return true;
+  }
+  return false;
+}
+
+bool isMultiWordRtlText(const String &text) {
+  return textContainsRtlRun(text) && textContainsSpace(text);
+}
+
+// Visual placement for phantom (before/after) text. For Latin (LTR) words,
+// before goes left of current and after goes right. For Hebrew (RTL) words the
+// reading-order-prior words live to the right of current and upcoming words
+// live to the left, matching how the eye expects text to drift.
+int phantomBeforeX(int currentX, const TextLayoutMetrics &currentLayout,
+                   const TextLayoutMetrics &beforeLayout, int gap, bool currentIsRtl) {
+  if (currentIsRtl) {
+    return currentX + currentLayout.maxX + gap - beforeLayout.minX;
+  }
+  return currentX + currentLayout.minX - gap - beforeLayout.maxX;
+}
+
+int phantomAfterX(int currentX, const TextLayoutMetrics &currentLayout,
+                  const TextLayoutMetrics &afterLayout, int gap, bool currentIsRtl) {
+  if (currentIsRtl) {
+    return currentX + currentLayout.minX - gap - afterLayout.maxX;
+  }
+  return currentX + currentLayout.maxX + gap - afterLayout.minX;
+}
+
+template <typename Callback>
+void forEachTextWord(const String &text, Callback cb, bool reverse = false) {
+  uint16_t starts[24];
+  uint16_t ends[24];
+  size_t count = 0;
+  size_t i = 0;
+  const size_t maxRuns = sizeof(starts) / sizeof(starts[0]);
+  while (i < text.length() && count < maxRuns) {
+    while (i < text.length() && text[i] == ' ') ++i;
+    if (i >= text.length()) break;
+    starts[count] = static_cast<uint16_t>(i);
+    while (i < text.length() && text[i] != ' ') ++i;
+    ends[count] = static_cast<uint16_t>(i);
+    ++count;
+  }
+  for (size_t n = 0; n < count; ++n) {
+    const size_t idx = reverse ? count - 1 - n : n;
+    if (n > 0) cb(String());  // inter-word space
+    cb(text.substring(starts[idx], ends[idx]));
+  }
+}
+
 int textLayoutWidth(const TextLayoutMetrics &layout) {
   if (!layout.hasPixels) {
     return 0;
@@ -763,7 +823,14 @@ TextLayoutMetrics serif70WordLayoutRtl(const String &word, int focusByteIndex) {
   return layout;
 }
 
+TextLayoutMetrics serifWordLayoutMultiWord(const String &text, int divisor);
+TextLayoutMetrics serifWordLayoutMultiWordScaledPercent(const String &text, uint8_t scalePercent);
+TextLayoutMetrics serif70WordLayoutMultiWord(const String &text);
+
 TextLayoutMetrics serifWordLayout(const String &word, int focusIndex, int divisor = 1) {
+  if (isMultiWordRtlText(word)) {
+    return serifWordLayoutMultiWord(word, divisor);
+  }
   if (LatinText::isRtlWord(word)) {
     return serifWordLayoutRtl(word, focusIndex, divisor);
   }
@@ -803,6 +870,9 @@ TextLayoutMetrics serifWordLayout(const String &word, int focusIndex, int diviso
 
 TextLayoutMetrics serifWordLayoutScaledPercent(const String &word, int focusIndex,
                                                uint8_t scalePercent) {
+  if (isMultiWordRtlText(word)) {
+    return serifWordLayoutMultiWordScaledPercent(word, scalePercent);
+  }
   if (LatinText::isRtlWord(word)) {
     return serifWordLayoutScaledPercentRtl(word, focusIndex, scalePercent);
   }
@@ -842,6 +912,9 @@ TextLayoutMetrics serifWordLayoutScaledPercent(const String &word, int focusInde
 }
 
 TextLayoutMetrics serif70WordLayout(const String &word, int focusIndex) {
+  if (isMultiWordRtlText(word)) {
+    return serif70WordLayoutMultiWord(word);
+  }
   if (LatinText::isRtlWord(word)) {
     return serif70WordLayoutRtl(word, focusIndex);
   }
@@ -876,6 +949,62 @@ TextLayoutMetrics serif70WordLayout(const String &word, int focusIndex) {
   }
 
   return layout;
+}
+
+TextLayoutMetrics serifWordLayoutMultiWord(const String &text, int divisor) {
+  divisor = std::max(1, divisor);
+  TextLayoutMetrics agg;
+  const ReaderGlyph spaceGlyph = glyphFor(' ', DisplayManager::ReaderTypeface::Standard);
+  const int spaceAdvance = std::max(1, scaledAdvance(spaceGlyph.xAdvance, divisor));
+  int cursorX = 0;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      cursorX += spaceAdvance;
+      return;
+    }
+    const int w = textLayoutWidth(serifWordLayout(word, -1, divisor));
+    if (w > 0) updateTextLayoutBounds(agg, cursorX, w);
+    cursorX += w;
+  });
+  if (agg.hasPixels) agg.focusCenterX = agg.minX + (textLayoutWidth(agg) / 2);
+  return agg;
+}
+
+TextLayoutMetrics serifWordLayoutMultiWordScaledPercent(const String &text, uint8_t scalePercent) {
+  TextLayoutMetrics agg;
+  const ReaderGlyph spaceGlyph = glyphFor(' ', DisplayManager::ReaderTypeface::Standard);
+  const int spaceAdvance =
+      std::max(1, scaledPercentDimension(spaceGlyph.xAdvance, scalePercent));
+  int cursorX = 0;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      cursorX += spaceAdvance;
+      return;
+    }
+    const int w = textLayoutWidth(serifWordLayoutScaledPercent(word, -1, scalePercent));
+    if (w > 0) updateTextLayoutBounds(agg, cursorX, w);
+    cursorX += w;
+  });
+  if (agg.hasPixels) agg.focusCenterX = agg.minX + (textLayoutWidth(agg) / 2);
+  return agg;
+}
+
+TextLayoutMetrics serif70WordLayoutMultiWord(const String &text) {
+  TextLayoutMetrics agg;
+  const ReaderGlyph spaceGlyph = glyph70For(' ', DisplayManager::ReaderTypeface::Standard);
+  const int spaceAdvance = std::max(1, static_cast<int>(spaceGlyph.xAdvance));
+  int cursorX = 0;
+  forEachTextWord(text, [&](const String &word) {
+    if (word.isEmpty()) {
+      cursorX += spaceAdvance;
+      return;
+    }
+    const int w = textLayoutWidth(serif70WordLayout(word, -1));
+    if (w > 0) updateTextLayoutBounds(agg, cursorX, w);
+    cursorX += w;
+  });
+  if (agg.hasPixels) agg.focusCenterX = agg.minX + (textLayoutWidth(agg) / 2);
+  return agg;
 }
 
 int serifWordWidth(const String &word) { return textLayoutWidth(serifWordLayout(word, -1)); }
@@ -1332,32 +1461,6 @@ int DisplayManager::measureTextWidth(const String &word) const {
   return textLayoutWidth(serifWordLayout(word, -1));
 }
 
-namespace {
-
-bool textContainsRtlRun(const String &text) {
-  for (size_t i = 0; i < text.length(); ++i) {
-    if (LatinText::isRtlSentinel(LatinText::byteValue(text[i]))) return true;
-  }
-  return false;
-}
-
-template <typename Callback>
-void forEachTextWord(const String &text, Callback cb) {
-  size_t i = 0;
-  bool emittedAny = false;
-  while (i < text.length()) {
-    while (i < text.length() && text[i] == ' ') ++i;
-    if (i >= text.length()) break;
-    const size_t start = i;
-    while (i < text.length() && text[i] != ' ') ++i;
-    if (emittedAny) cb(String());  // inter-word space
-    cb(text.substring(start, i));
-    emittedAny = true;
-  }
-}
-
-}  // namespace
-
 int DisplayManager::measureSerifTextWidth(const String &text, int divisor) const {
   if (!textContainsRtlRun(text)) {
     return textLayoutWidth(serifWordLayout(text, -1, divisor));
@@ -1758,6 +1861,7 @@ void DisplayManager::drawSerifTextAt(const String &text, int x, int y, uint16_t 
     return;
   }
   const ReaderTypeface latinTypeface = currentReaderTypeface();
+  const bool reverseOrder = isMultiWordRtlText(text);
   int cursorX = x;
   forEachTextWord(text, [&](const String &word) {
     if (word.isEmpty()) {
@@ -1785,7 +1889,7 @@ void DisplayManager::drawSerifTextAt(const String &text, int x, int y, uint16_t 
       }
       cursorX += std::max(1, tracked);
     }
-  });
+  }, reverseOrder);
 }
 
 void DisplayManager::drawSerif70TextAt(const String &text, int x, int y, uint16_t color) {
@@ -1806,6 +1910,7 @@ void DisplayManager::drawSerif70TextAt(const String &text, int x, int y, uint16_
     return;
   }
   const ReaderTypeface latinTypeface = currentReaderTypeface();
+  const bool reverseOrder = isMultiWordRtlText(text);
   int cursorX = x;
   forEachTextWord(text, [&](const String &word) {
     if (word.isEmpty()) {
@@ -1830,7 +1935,7 @@ void DisplayManager::drawSerif70TextAt(const String &text, int x, int y, uint16_
       }
       cursorX += std::max(1, tracked);
     }
-  });
+  }, reverseOrder);
 }
 
 void DisplayManager::drawSerifTextScaledAt(const String &text, int x, int y, uint16_t color,
@@ -1857,6 +1962,7 @@ void DisplayManager::drawSerifTextScaledAt(const String &text, int x, int y, uin
     return;
   }
   const ReaderTypeface latinTypeface = currentReaderTypeface();
+  const bool reverseOrder = isMultiWordRtlText(text);
   int cursorX = x;
   forEachTextWord(text, [&](const String &word) {
     if (word.isEmpty()) {
@@ -1887,7 +1993,7 @@ void DisplayManager::drawSerifTextScaledAt(const String &text, int x, int y, uin
       }
       cursorX += std::max(1, tracked);
     }
-  });
+  }, reverseOrder);
 }
 
 void DisplayManager::drawTinyGlyph(int x, int y, char c, uint16_t color, int scale) {
@@ -2466,15 +2572,15 @@ void DisplayManager::renderPhantomRsvpWord(const String &beforeText, const Strin
     drawRsvpAnchorGuide(anchorX, textY, mediumHeight);
     if (!beforeText.isEmpty()) {
       const TextLayoutMetrics beforeLayout = serif70WordLayout(beforeText, -1);
-      const int beforeX =
-          currentX + currentLayout.minX - kPhantomCurrentGapMedium - beforeLayout.maxX;
+      const int beforeX = phantomBeforeX(currentX, currentLayout, beforeLayout,
+                                         kPhantomCurrentGapMedium, LatinText::isRtlWord(word));
       drawSerif70TextAt(beforeText, beforeX, textY, phantomColor);
     }
     drawRsvp70WordAt(word, currentX, textY, focusIndex);
     if (!afterText.isEmpty()) {
       const TextLayoutMetrics afterLayout = serif70WordLayout(afterText, -1);
-      const int afterX =
-          currentX + currentLayout.maxX + kPhantomCurrentGapMedium - afterLayout.minX;
+      const int afterX = phantomAfterX(currentX, currentLayout, afterLayout,
+                                       kPhantomCurrentGapMedium, LatinText::isRtlWord(word));
       drawSerif70TextAt(afterText, afterX, textY, phantomColor);
     }
     if (showFooter) {
@@ -2512,14 +2618,16 @@ void DisplayManager::renderPhantomRsvpWord(const String &beforeText, const Strin
   if (!beforeText.isEmpty()) {
     const TextLayoutMetrics beforeLayout =
         serifWordLayoutScaledPercent(beforeText, -1, style.scalePercent);
-    const int beforeX = currentX + currentLayout.minX - style.currentGap - beforeLayout.maxX;
+    const int beforeX = phantomBeforeX(currentX, currentLayout, beforeLayout,
+                                       style.currentGap, LatinText::isRtlWord(word));
     drawSerifTextScaledAt(beforeText, beforeX, textY, phantomColor, style.scalePercent);
   }
   drawRsvpWordScaledPercentAt(word, currentX, textY, focusIndex, style.scalePercent);
   if (!afterText.isEmpty()) {
     const TextLayoutMetrics afterLayout =
         serifWordLayoutScaledPercent(afterText, -1, style.scalePercent);
-    const int afterX = currentX + currentLayout.maxX + style.currentGap - afterLayout.minX;
+    const int afterX = phantomAfterX(currentX, currentLayout, afterLayout,
+                                     style.currentGap, LatinText::isRtlWord(word));
     drawSerifTextScaledAt(afterText, afterX, textY, phantomColor, style.scalePercent);
   }
   if (showFooter) {
@@ -2799,15 +2907,15 @@ void DisplayManager::renderTypographyPreview(const String &beforeText, const Str
     drawRsvpAnchorGuide(anchorX, textY, textHeight);
     if (!beforeText.isEmpty()) {
       const TextLayoutMetrics beforeLayout = serif70WordLayout(beforeText, -1);
-      const int beforeX =
-          currentX + currentLayout.minX - kPhantomCurrentGapMedium - beforeLayout.maxX;
+      const int beforeX = phantomBeforeX(currentX, currentLayout, beforeLayout,
+                                         kPhantomCurrentGapMedium, LatinText::isRtlWord(word));
       drawSerif70TextAt(beforeText, beforeX, textY, phantomColor);
     }
     drawRsvp70WordAt(word, currentX, textY, focusIndex);
     if (!afterText.isEmpty()) {
       const TextLayoutMetrics afterLayout = serif70WordLayout(afterText, -1);
-      const int afterX =
-          currentX + currentLayout.maxX + kPhantomCurrentGapMedium - afterLayout.minX;
+      const int afterX = phantomAfterX(currentX, currentLayout, afterLayout,
+                                       kPhantomCurrentGapMedium, LatinText::isRtlWord(word));
       drawSerif70TextAt(afterText, afterX, textY, phantomColor);
     }
   } else {
@@ -2828,14 +2936,16 @@ void DisplayManager::renderTypographyPreview(const String &beforeText, const Str
     if (!beforeText.isEmpty()) {
       const TextLayoutMetrics beforeLayout =
           serifWordLayoutScaledPercent(beforeText, -1, style.scalePercent);
-      const int beforeX = currentX + currentLayout.minX - style.currentGap - beforeLayout.maxX;
+      const int beforeX = phantomBeforeX(currentX, currentLayout, beforeLayout,
+                                       style.currentGap, LatinText::isRtlWord(word));
       drawSerifTextScaledAt(beforeText, beforeX, textY, phantomColor, style.scalePercent);
     }
     drawRsvpWordScaledPercentAt(word, currentX, textY, focusIndex, style.scalePercent);
     if (!afterText.isEmpty()) {
       const TextLayoutMetrics afterLayout =
           serifWordLayoutScaledPercent(afterText, -1, style.scalePercent);
-      const int afterX = currentX + currentLayout.maxX + style.currentGap - afterLayout.minX;
+      const int afterX = phantomAfterX(currentX, currentLayout, afterLayout,
+                                     style.currentGap, LatinText::isRtlWord(word));
       drawSerifTextScaledAt(afterText, afterX, textY, phantomColor, style.scalePercent);
     }
   }
@@ -2889,15 +2999,15 @@ void DisplayManager::renderPhantomRsvpWordWithWpm(const String &beforeText, cons
     drawRsvpAnchorGuide(anchorX, textY, mediumHeight);
     if (!beforeText.isEmpty()) {
       const TextLayoutMetrics beforeLayout = serif70WordLayout(beforeText, -1);
-      const int beforeX =
-          currentX + currentLayout.minX - kPhantomCurrentGapMedium - beforeLayout.maxX;
+      const int beforeX = phantomBeforeX(currentX, currentLayout, beforeLayout,
+                                         kPhantomCurrentGapMedium, LatinText::isRtlWord(word));
       drawSerif70TextAt(beforeText, beforeX, textY, phantomColor);
     }
     drawRsvp70WordAt(word, currentX, textY, focusIndex);
     if (!afterText.isEmpty()) {
       const TextLayoutMetrics afterLayout = serif70WordLayout(afterText, -1);
-      const int afterX =
-          currentX + currentLayout.maxX + kPhantomCurrentGapMedium - afterLayout.minX;
+      const int afterX = phantomAfterX(currentX, currentLayout, afterLayout,
+                                       kPhantomCurrentGapMedium, LatinText::isRtlWord(word));
       drawSerif70TextAt(afterText, afterX, textY, phantomColor);
     }
     drawTinyTextCentered(wpmText, wpmY, focusColor(), kTinyScale);
@@ -2938,14 +3048,16 @@ void DisplayManager::renderPhantomRsvpWordWithWpm(const String &beforeText, cons
   if (!beforeText.isEmpty()) {
     const TextLayoutMetrics beforeLayout =
         serifWordLayoutScaledPercent(beforeText, -1, style.scalePercent);
-    const int beforeX = currentX + currentLayout.minX - style.currentGap - beforeLayout.maxX;
+    const int beforeX = phantomBeforeX(currentX, currentLayout, beforeLayout,
+                                       style.currentGap, LatinText::isRtlWord(word));
     drawSerifTextScaledAt(beforeText, beforeX, textY, phantomColor, style.scalePercent);
   }
   drawRsvpWordScaledPercentAt(word, currentX, textY, focusIndex, style.scalePercent);
   if (!afterText.isEmpty()) {
     const TextLayoutMetrics afterLayout =
         serifWordLayoutScaledPercent(afterText, -1, style.scalePercent);
-    const int afterX = currentX + currentLayout.maxX + style.currentGap - afterLayout.minX;
+    const int afterX = phantomAfterX(currentX, currentLayout, afterLayout,
+                                     style.currentGap, LatinText::isRtlWord(word));
     drawSerifTextScaledAt(afterText, afterX, textY, phantomColor, style.scalePercent);
   }
   drawTinyTextCentered(wpmText, wpmY, focusColor(), kTinyScale);
