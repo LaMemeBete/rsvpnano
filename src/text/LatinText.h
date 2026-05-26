@@ -7,6 +7,96 @@ namespace LatinText {
 
 inline uint8_t byteValue(char c) { return static_cast<uint8_t>(c); }
 
+// 0x7F (DEL) is reserved as a per-word "this word is right-to-left, the bytes
+// after me are raw UTF-8" marker. DEL is never produced by Latin storage
+// transliteration, is not a UTF-8 lead/continuation byte, and is > space so it
+// survives the whitespace-collapse pass in storage normalisation.
+static constexpr uint8_t kRtlWordSentinel = 0x7F;
+
+inline bool isRtlSentinel(uint8_t value) { return value == kRtlWordSentinel; }
+
+inline bool isUtf8Continuation(uint8_t value) { return (value & 0xC0) == 0x80; }
+
+inline bool isHebrewLetterCodepoint(uint32_t codepoint) {
+  return codepoint >= 0x05D0 && codepoint <= 0x05EA;
+}
+
+// True for codepoints that are dropped entirely at ingest. We skip niqqud,
+// cantillation marks, and Hebrew presentation forms in v1.
+inline bool isHebrewMarkCodepoint(uint32_t codepoint) {
+  return (codepoint >= 0x0591 && codepoint <= 0x05BD) || codepoint == 0x05BF ||
+         codepoint == 0x05C1 || codepoint == 0x05C2 || codepoint == 0x05C4 ||
+         codepoint == 0x05C5 || codepoint == 0x05C7;
+}
+
+inline void appendUtf8(String &target, uint32_t codepoint) {
+  if (codepoint < 0x80) {
+    target += static_cast<char>(codepoint);
+  } else if (codepoint < 0x800) {
+    target += static_cast<char>(0xC0 | (codepoint >> 6));
+    target += static_cast<char>(0x80 | (codepoint & 0x3F));
+  } else if (codepoint < 0x10000) {
+    target += static_cast<char>(0xE0 | (codepoint >> 12));
+    target += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+    target += static_cast<char>(0x80 | (codepoint & 0x3F));
+  } else {
+    target += static_cast<char>(0xF0 | (codepoint >> 18));
+    target += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+    target += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+    target += static_cast<char>(0x80 | (codepoint & 0x3F));
+  }
+}
+
+// Iterates an RTL-tagged word's codepoints. Caller resets `index` to 1 (past
+// the sentinel) before the first call. Returns false at end of word or on
+// malformed UTF-8.
+inline bool decodeNextUtf8(const String &text, size_t &index, uint32_t &codepoint) {
+  if (index >= text.length()) return false;
+  const uint8_t first = static_cast<uint8_t>(text[index]);
+  if (first < 0x80) {
+    codepoint = first;
+    ++index;
+    return true;
+  }
+
+  uint8_t continuationCount = 0;
+  uint32_t minimumValue = 0;
+  uint32_t value = 0;
+  if ((first & 0xE0) == 0xC0) {
+    value = first & 0x1F;
+    continuationCount = 1;
+    minimumValue = 0x80;
+  } else if ((first & 0xF0) == 0xE0) {
+    value = first & 0x0F;
+    continuationCount = 2;
+    minimumValue = 0x800;
+  } else if ((first & 0xF8) == 0xF0) {
+    value = first & 0x07;
+    continuationCount = 3;
+    minimumValue = 0x10000;
+  } else {
+    return false;
+  }
+
+  if (index + 1 + continuationCount > text.length()) return false;
+  for (uint8_t i = 1; i <= continuationCount; ++i) {
+    const uint8_t next = static_cast<uint8_t>(text[index + i]);
+    if (!isUtf8Continuation(next)) return false;
+    value = (value << 6) | (next & 0x3F);
+  }
+  if (value < minimumValue || value > 0x10FFFF ||
+      (value >= 0xD800 && value <= 0xDFFF)) {
+    return false;
+  }
+  codepoint = value;
+  index += 1 + continuationCount;
+  return true;
+}
+
+inline bool isRtlWord(const String &word) {
+  return !word.isEmpty() && byteValue(word[0]) == kRtlWordSentinel;
+}
+
 inline bool isLowCustomSlotByte(uint8_t value) {
   switch (value) {
     case 0x01:

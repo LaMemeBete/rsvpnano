@@ -1,4 +1,5 @@
 .pio
+.piovenv
 .derivedData
 *.xcuserstate
 xcuserdata/

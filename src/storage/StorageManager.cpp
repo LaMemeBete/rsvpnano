@@ -1223,6 +1223,7 @@ String normalizeDisplayText(const String &text, ParseStats *stats = nullptr) {
   String normalized;
   normalized.reserve(text.length());
 
+  bool hebrewActive = false;
   size_t index = 0;
   while (index < text.length()) {
     const size_t before = index;
@@ -1231,6 +1232,18 @@ String normalizeDisplayText(const String &text, ParseStats *stats = nullptr) {
       if (stats != nullptr && codepoint > 0x7F) {
         ++stats->nonAsciiCodepoints;
       }
+      if (LatinText::isHebrewMarkCodepoint(codepoint)) {
+        continue;  // niqqud / cantillation dropped in v1
+      }
+      if (LatinText::isHebrewLetterCodepoint(codepoint)) {
+        if (!hebrewActive) {
+          normalized += static_cast<char>(LatinText::kRtlWordSentinel);
+          hebrewActive = true;
+        }
+        LatinText::appendUtf8(normalized, codepoint);
+        continue;
+      }
+      hebrewActive = false;
       appendDisplayApproximation(normalized, codepoint);
       continue;
     }
@@ -1239,6 +1252,7 @@ String normalizeDisplayText(const String &text, ParseStats *stats = nullptr) {
       ++stats->malformedUtf8;
     }
     index = before + 1;
+    hebrewActive = false;
     const uint8_t rawByte = static_cast<uint8_t>(text[before]);
     if (LatinText::isWordCharacter(rawByte) || LatinText::isLowCustomSlotByte(rawByte)) {
       normalized += static_cast<char>(rawByte);

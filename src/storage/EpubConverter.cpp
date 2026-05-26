@@ -822,6 +822,14 @@ String decodedEntityText(const String &entity) {
     if (value == 0x2026) {
       return "...";
     }
+    if (LatinText::isHebrewLetterCodepoint(value)) {
+      String decoded;
+      LatinText::appendUtf8(decoded, value);
+      return decoded;
+    }
+    if (LatinText::isHebrewMarkCodepoint(value)) {
+      return String();
+    }
   }
 
   String decoded;
@@ -952,15 +960,29 @@ String normalizeDisplayText(const String &text) {
   String normalized;
   normalized.reserve(text.length());
 
+  bool hebrewActive = false;
   size_t index = 0;
   while (index < text.length()) {
     const size_t before = index;
     uint32_t codepoint = 0;
     if (decodeUtf8Codepoint(text, index, codepoint)) {
+      if (LatinText::isHebrewMarkCodepoint(codepoint)) {
+        continue;
+      }
+      if (LatinText::isHebrewLetterCodepoint(codepoint)) {
+        if (!hebrewActive) {
+          normalized += static_cast<char>(LatinText::kRtlWordSentinel);
+          hebrewActive = true;
+        }
+        LatinText::appendUtf8(normalized, codepoint);
+        continue;
+      }
+      hebrewActive = false;
       appendDisplayApproximation(normalized, codepoint);
       continue;
     }
 
+    hebrewActive = false;
     index = before + 1;
     normalized += static_cast<char>(text[before]);
   }

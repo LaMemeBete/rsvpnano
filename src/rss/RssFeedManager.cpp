@@ -111,6 +111,14 @@ bool appendDecodedCodepoint(String &target, uint32_t codepoint) {
     return true;
   }
 
+  if (LatinText::isHebrewMarkCodepoint(codepoint)) {
+    return true;
+  }
+  if (LatinText::isHebrewLetterCodepoint(codepoint)) {
+    LatinText::appendUtf8(target, codepoint);
+    return true;
+  }
+
   uint8_t storedByte = 0;
   if (LatinText::storageByteForCodepoint(codepoint, storedByte)) {
     target += static_cast<char>(storedByte);
