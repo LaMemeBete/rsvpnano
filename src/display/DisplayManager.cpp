@@ -704,6 +704,21 @@ int phantomAfterX(int currentX, const TextLayoutMetrics &currentLayout,
   return currentX + currentLayout.maxX + gap - afterLayout.minX;
 }
 
+bool wordIsRtl(const String &word) {
+  return LatinText::isRtlWord(word) || isMultiWordRtlText(word);
+}
+
+// Anchor (ORP) screen X. Latin words fixate ~anchorPercent% from the left so
+// the word extends rightward into the reading direction; Hebrew words mirror
+// to (100 - anchorPercent)% so the word extends leftward.
+int anchorXForWord(const String &word, int virtualWidth) {
+  int pct = currentAnchorPercent();
+  if (wordIsRtl(word)) {
+    pct = 100 - pct;
+  }
+  return (virtualWidth * pct) / 100;
+}
+
 template <typename Callback>
 void forEachTextWord(const String &text, Callback cb, bool reverse = false) {
   uint16_t starts[24];
@@ -1107,7 +1122,7 @@ int rsvpStartX(const String &word, int focusIndex, int virtualWidth, int divisor
     return ((virtualWidth - wordWidth) / 2) - layout.minX;
   }
 
-  const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+  const int anchorX = anchorXForWord(word, virtualWidth);
   const int x = anchorX - layout.focusCenterX;
   if (!clampToMargins) {
     return x;
@@ -1130,7 +1145,7 @@ int rsvpStartXScaledPercent(const String &word, int focusIndex, int virtualWidth
     return ((virtualWidth - wordWidth) / 2) - layout.minX;
   }
 
-  const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+  const int anchorX = anchorXForWord(word, virtualWidth);
   const int x = anchorX - layout.focusCenterX;
   if (!clampToMargins) {
     return x;
@@ -1154,7 +1169,7 @@ int rsvpStartX70(const String &word, int focusIndex, int virtualWidth, bool clam
     return ((virtualWidth - wordWidth) / 2) - layout.minX;
   }
 
-  const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+  const int anchorX = anchorXForWord(word, virtualWidth);
   const int x = anchorX - layout.focusCenterX;
   if (!clampToMargins) {
     return x;
@@ -2475,7 +2490,7 @@ void DisplayManager::renderRsvpWord(const String &word, const String &chapterLab
   const int y = std::max(0, (virtualHeight - glyphHeight) / 2);
   const int focusIndex = findFocusLetterIndex(word);
   const int x = rsvpStartX(word, focusIndex, virtualWidth, 1, false);
-  const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+  const int anchorX = anchorXForWord(word, virtualWidth);
 
   clearVirtualBuffer(virtualWidth, virtualHeight);
   drawRsvpAnchorGuide(anchorX, y, glyphHeight);
@@ -2519,7 +2534,7 @@ void DisplayManager::renderRsvpWordWithWpm(const String &word, uint16_t wpm,
       std::max(0, virtualHeight - kTinyGlyphHeight * kTinyScale - kWpmFeedbackBottomMargin - 24);
   const int focusIndex = findFocusLetterIndex(word);
   const int x = rsvpStartX(word, focusIndex, virtualWidth, 1, false);
-  const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+  const int anchorX = anchorXForWord(word, virtualWidth);
 
   clearVirtualBuffer(virtualWidth, virtualHeight);
   drawRsvpAnchorGuide(anchorX, wordY, glyphHeight);
@@ -2564,7 +2579,7 @@ void DisplayManager::renderPhantomRsvpWord(const String &beforeText, const Strin
     const int textY = std::max(0, (virtualHeight - mediumHeight) / 2);
     const int focusIndex = findFocusLetterIndex(word);
     const int currentX = rsvpStartX70(word, focusIndex, virtualWidth, false);
-    const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+    const int anchorX = anchorXForWord(word, virtualWidth);
     const TextLayoutMetrics currentLayout = serif70WordLayout(word, focusIndex);
     const uint16_t phantomColor = blendOverBackground(wordColor(), kPhantomAlphaMedium);
 
@@ -2608,7 +2623,7 @@ void DisplayManager::renderPhantomRsvpWord(const String &beforeText, const Strin
   const int focusIndex = findFocusLetterIndex(word);
   const int currentX =
       rsvpStartXScaledPercent(word, focusIndex, virtualWidth, style.scalePercent, false);
-  const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+  const int anchorX = anchorXForWord(word, virtualWidth);
   const TextLayoutMetrics currentLayout =
       serifWordLayoutScaledPercent(word, focusIndex, style.scalePercent);
   const uint16_t phantomColor = blendOverBackground(wordColor(), style.alpha);
@@ -2900,7 +2915,7 @@ void DisplayManager::renderTypographyPreview(const String &beforeText, const Str
     textY = std::max(textTop, std::min(textY, textBottom - textHeight));
     const int focusIndex = findFocusLetterIndex(word);
     const int currentX = rsvpStartX70(word, focusIndex, virtualWidth, false);
-    const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+    const int anchorX = anchorXForWord(word, virtualWidth);
     const TextLayoutMetrics currentLayout = serif70WordLayout(word, focusIndex);
     const uint16_t phantomColor = blendOverBackground(wordColor(), kPhantomAlphaMedium);
 
@@ -2927,7 +2942,7 @@ void DisplayManager::renderTypographyPreview(const String &beforeText, const Str
     const int focusIndex = findFocusLetterIndex(word);
     const int currentX =
         rsvpStartXScaledPercent(word, focusIndex, virtualWidth, style.scalePercent, false);
-    const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+    const int anchorX = anchorXForWord(word, virtualWidth);
     const TextLayoutMetrics currentLayout =
         serifWordLayoutScaledPercent(word, focusIndex, style.scalePercent);
     const uint16_t phantomColor = blendOverBackground(wordColor(), style.alpha);
@@ -2991,7 +3006,7 @@ void DisplayManager::renderPhantomRsvpWordWithWpm(const String &beforeText, cons
         std::max(0, virtualHeight - kTinyGlyphHeight * kTinyScale - kWpmFeedbackBottomMargin - 24);
     const int focusIndex = findFocusLetterIndex(word);
     const int currentX = rsvpStartX70(word, focusIndex, virtualWidth, false);
-    const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+    const int anchorX = anchorXForWord(word, virtualWidth);
     const TextLayoutMetrics currentLayout = serif70WordLayout(word, focusIndex);
     const uint16_t phantomColor = blendOverBackground(wordColor(), kPhantomAlphaMedium);
 
@@ -3038,7 +3053,7 @@ void DisplayManager::renderPhantomRsvpWordWithWpm(const String &beforeText, cons
   const int focusIndex = findFocusLetterIndex(word);
   const int currentX =
       rsvpStartXScaledPercent(word, focusIndex, virtualWidth, style.scalePercent, false);
-  const int anchorX = (virtualWidth * currentAnchorPercent()) / 100;
+  const int anchorX = anchorXForWord(word, virtualWidth);
   const TextLayoutMetrics currentLayout =
       serifWordLayoutScaledPercent(word, focusIndex, style.scalePercent);
   const uint16_t phantomColor = blendOverBackground(wordColor(), style.alpha);
