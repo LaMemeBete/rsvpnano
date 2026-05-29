@@ -490,8 +490,12 @@ ReaderGlyph glyph70ForCodepoint(uint32_t cp, DisplayManager::ReaderTypeface type
 }
 
 // Reads codepoints out of an RTL-tagged word into a fixed-size buffer. Returns
-// the number of codepoints actually written (clamped to `capacity`). Skips the
-// sentinel byte at word[0]. Malformed UTF-8 bytes are also skipped.
+// the number of codepoints actually written (clamped to `capacity`). Sentinel
+// bytes are skipped wherever they appear (a token may carry leading/trailing
+// punctuation around the Hebrew run, putting the sentinel mid-token). Other
+// codepoints — Hebrew letters and any embedded ASCII/Latin punctuation — are
+// decoded so they take part in the right-to-left flow. Malformed UTF-8 bytes
+// are skipped.
 struct RtlGlyphRun {
   uint32_t codepoint;
   uint16_t byteStart;
@@ -500,8 +504,12 @@ struct RtlGlyphRun {
 size_t collectRtlGlyphRun(const String &word, RtlGlyphRun *out, size_t capacity) {
   if (!LatinText::isRtlWord(word) || capacity == 0) return 0;
   size_t count = 0;
-  size_t idx = 1;
+  size_t idx = 0;
   while (idx < word.length() && count < capacity) {
+    if (LatinText::isRtlSentinel(LatinText::byteValue(word[idx]))) {
+      ++idx;
+      continue;
+    }
     const size_t start = idx;
     uint32_t cp = 0;
     if (!LatinText::decodeNextUtf8(word, idx, cp)) {
@@ -1065,7 +1073,7 @@ int orpOrdinalForLength(int length) {
 int findFocusLetterIndexRtl(const String &word) {
   RtlGlyphRun run[kMaxRtlGlyphRun];
   const size_t count = collectRtlGlyphRun(word, run, kMaxRtlGlyphRun);
-  if (count == 0) return word.length() > 1 ? 1 : -1;
+  if (count == 0) return word.isEmpty() ? -1 : 0;
 
   int letterCount = 0;
   for (size_t i = 0; i < count; ++i) {

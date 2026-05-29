@@ -93,8 +93,15 @@ inline bool decodeNextUtf8(const String &text, size_t &index, uint32_t &codepoin
   return true;
 }
 
+// True if the token contains a Hebrew run. The sentinel marks the start of a
+// Hebrew run; it can sit mid-token when punctuation (e.g. a leading paren or
+// quote) precedes the Hebrew letters, so scan the whole token rather than just
+// byte 0.
 inline bool isRtlWord(const String &word) {
-  return !word.isEmpty() && byteValue(word[0]) == kRtlWordSentinel;
+  for (size_t i = 0; i < word.length(); ++i) {
+    if (byteValue(word[i]) == kRtlWordSentinel) return true;
+  }
+  return false;
 }
 
 inline bool isLowCustomSlotByte(uint8_t value) {
