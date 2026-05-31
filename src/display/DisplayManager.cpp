@@ -1537,9 +1537,26 @@ int DisplayManager::measureSerifTextWidthScaled(const String &text, uint8_t scal
   return total;
 }
 
+namespace {
+
+// The tiny bitmap font has no Hebrew glyphs. When chrome text (chapter labels,
+// book titles, etc.) contains Hebrew we render it via the small-scaled NotoSans
+// serif path instead, since that path already understands Hebrew + RTL. Pick a
+// percent that matches the tiny scale's pixel height: tiny is 7px tall * scale,
+// the serif font is 62px tall, so 11% per unit scale lines up the heights.
+uint8_t tinyToSerifScalePercent(int scale) {
+  const int pct = std::max(1, scale) * 11;
+  return static_cast<uint8_t>(std::max(8, std::min(60, pct)));
+}
+
+}  // namespace
+
 int DisplayManager::measureTinyTextWidth(const String &text, int scale) const {
   if (text.isEmpty()) {
     return 0;
+  }
+  if (textContainsRtlRun(text)) {
+    return measureSerifTextWidthScaled(text, tinyToSerifScalePercent(scale));
   }
   return static_cast<int>(text.length()) * (kTinyGlyphWidth + kTinyGlyphSpacing) * scale -
          kTinyGlyphSpacing * scale;
@@ -1598,6 +1615,9 @@ String DisplayManager::fitSerifTextTrailingScaled(const String &text, int maxWid
 }
 
 String DisplayManager::fitTinyText(const String &text, int maxWidth, int scale) const {
+  if (textContainsRtlRun(text)) {
+    return fitSerifTextScaled(text, maxWidth, tinyToSerifScalePercent(scale));
+  }
   if (measureTinyTextWidth(text, scale) <= maxWidth) {
     return text;
   }
@@ -1614,6 +1634,9 @@ String DisplayManager::fitTinyText(const String &text, int maxWidth, int scale) 
 }
 
 String DisplayManager::fitTinyTextTrailing(const String &text, int maxWidth, int scale) const {
+  if (textContainsRtlRun(text)) {
+    return fitSerifTextTrailingScaled(text, maxWidth, tinyToSerifScalePercent(scale));
+  }
   if (measureTinyTextWidth(text, scale) <= maxWidth) {
     return text;
   }
@@ -2048,6 +2071,10 @@ void DisplayManager::drawTinyGlyph(int x, int y, char c, uint16_t color, int sca
 }
 
 void DisplayManager::drawTinyTextAt(const String &text, int x, int y, uint16_t color, int scale) {
+  if (textContainsRtlRun(text)) {
+    drawSerifTextScaledAt(text, x, y, color, tinyToSerifScalePercent(scale));
+    return;
+  }
   int cursorX = x;
   for (size_t i = 0; i < text.length(); ++i) {
     drawTinyGlyph(cursorX, y, text[i], color, scale);
