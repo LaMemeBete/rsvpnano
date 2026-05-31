@@ -742,10 +742,46 @@ void forEachTextWord(const String &text, Callback cb, bool reverse = false) {
     ends[count] = static_cast<uint16_t>(i);
     ++count;
   }
-  for (size_t n = 0; n < count; ++n) {
-    const size_t idx = reverse ? count - 1 - n : n;
-    if (n > 0) cb(String());  // inter-word space
-    cb(text.substring(starts[idx], ends[idx]));
+  if (!reverse) {
+    for (size_t n = 0; n < count; ++n) {
+      if (n > 0) cb(String());
+      cb(text.substring(starts[n], ends[n]));
+    }
+    return;
+  }
+  // RTL traversal with embedded-LTR preservation: walk words in reverse
+  // logical order, but when we hit a Latin sub-run, emit those words in
+  // forward (LTR) order so an English parenthetical inside a Hebrew title
+  // reads "(How to Love Your Daughter)" rather than "Daughter) Your Love
+  // to (How". Hebrew words stay in their reversed positions, which gives
+  // the eye the expected RTL flow.
+  ssize_t idx = static_cast<ssize_t>(count) - 1;
+  bool emittedAny = false;
+  auto emitRange = [&](ssize_t lo, ssize_t hi) {
+    for (ssize_t k = lo; k <= hi; ++k) {
+      if (emittedAny) cb(String());
+      cb(text.substring(starts[k], ends[k]));
+      emittedAny = true;
+    }
+  };
+  while (idx >= 0) {
+    const String word = text.substring(starts[idx], ends[idx]);
+    if (LatinText::isRtlWord(word)) {
+      if (emittedAny) cb(String());
+      cb(word);
+      emittedAny = true;
+      --idx;
+      continue;
+    }
+    // Find the start of the contiguous non-Hebrew sub-run going backward.
+    ssize_t lo = idx;
+    while (lo > 0) {
+      const String prev = text.substring(starts[lo - 1], ends[lo - 1]);
+      if (LatinText::isRtlWord(prev)) break;
+      --lo;
+    }
+    emitRange(lo, idx);
+    idx = lo - 1;
   }
 }
 
@@ -1541,12 +1577,14 @@ namespace {
 
 // The tiny bitmap font has no Hebrew glyphs. When chrome text (chapter labels,
 // book titles, etc.) contains Hebrew we render it via the small-scaled NotoSans
-// serif path instead, since that path already understands Hebrew + RTL. Pick a
-// percent that matches the tiny scale's pixel height: tiny is 7px tall * scale,
-// the serif font is 62px tall, so 11% per unit scale lines up the heights.
+// serif path instead, since that path already understands Hebrew + RTL. Hebrew
+// letters use less of the font's vertical extent than Latin caps, so matching
+// the tiny scale's pixel height pixel-for-pixel makes the visible Hebrew
+// x-height look noticeably smaller than adjacent Latin. Scale up so Hebrew
+// reads at roughly the same on-screen weight as Latin caps next to it.
 uint8_t tinyToSerifScalePercent(int scale) {
-  const int pct = std::max(1, scale) * 11;
-  return static_cast<uint8_t>(std::max(8, std::min(60, pct)));
+  const int pct = std::max(1, scale) * 17;
+  return static_cast<uint8_t>(std::max(12, std::min(60, pct)));
 }
 
 }  // namespace
